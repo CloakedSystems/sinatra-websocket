@@ -3,6 +3,8 @@ require 'em-websocket'
 require 'sinatra-websocket/error'
 require 'sinatra-websocket/ext/thin/connection'
 require 'sinatra-websocket/ext/sinatra/request'
+require 'em-websocket/handshake'
+require 'ostruct'
 
 module SinatraWebsocket
   class Connection < ::EventMachine::WebSocket::Connection
@@ -22,19 +24,15 @@ module SinatraWebsocket
         connection.dispatch(request) ? async_response : failure_response
       end
 
-      #######
-      # Taken from WebSocket Rack
-      # https://github.com/imanel/websocket-rack
-      #######
-
       # Parse Rack env to em-websocket-compatible format
       # this probably should be moved to Base in future
       def request_from_env(env)
-        request = {}
-        request['path']   = env['REQUEST_URI'].to_s
-        request['method'] = env['REQUEST_METHOD']
-        request['query']  = env['QUERY_STRING'].to_s
-        request['Body']   = env['rack.input'].read
+        request = OpenStruct.new
+        request.request_url = env['rack.url_scheme'] + '://' + env['HTTP_HOST'] + env['REQUEST_URI']
+        request.http_method = env['REQUEST_METHOD']
+        request['upgrade?'] = env['HTTP_CONNECTION'] && env['HTTP_UPGRADE'] &&
+            env['HTTP_CONNECTION'].split(',').map(&:strip).map(&:downcase).include?('upgrade') &&
+            env['HTTP_UPGRADE'].downcase == 'websocket'
 
         env.each do |key, value|
           if key.match(/HTTP_(.+)/)
@@ -95,14 +93,11 @@ module SinatraWebsocket
     def initialize(app, socket, options = {})
       @app     = app
       @socket  = socket
-      @options = options
-      @debug   = options[:debug] || false
+      super(options)
       @ssl     = socket.backend.respond_to?(:ssl?) && socket.backend.ssl?
 
       socket.websocket = self
       socket.comm_inactivity_timeout = 0
-
-      debug [:initialize]
     end
 
     def get_peername
@@ -111,17 +106,36 @@ module SinatraWebsocket
 
     # Overwrite dispath from em-websocket
     # we already have request headers parsed so
-    # we can skip it and call build_with_request
+    # we must jerry rig the handshake
     def dispatch(data)
       return false if data.nil?
-      debug [:inbound_headers, data]
-      @handler = EventMachine::WebSocket::HandlerFactory.build_with_request(self, data, data['Body'], @ssl, @debug)
-      unless @handler
-        # The whole header has not been received yet.
-        return false
+      @handshake ||= begin
+        handshake = EventMachine::WebSocket::Handshake.new(@secure || @secure_proxy)
+
+        handshake.callback { |upgrade_response, handler_klass|
+          debug [:accepting_ws_version, handshake.protocol_version]
+          debug [:upgrade_response, upgrade_response]
+          self.send_data(upgrade_response)
+          @handler = handler_klass.new(self, @debug)
+          @handshake = nil
+          trigger_on_open(handshake)
+        }
+
+        handshake.errback { |e|
+          debug [:error, e]
+          trigger_on_error(e)
+          # Handshake errors require the connection to be aborted
+          abort
+        }
+
+        handshake
       end
-      @handler.run
-      return true
+
+      @handshake.instance_eval {
+        @parser = data
+        @headers = data
+        process(data, data)
+      }
     end
   end
 end # module::SinatraWebSocket
