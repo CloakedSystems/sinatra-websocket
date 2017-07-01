@@ -14,5 +14,5 @@ Gem::Specification.new do |s|
   s.add_dependency 'eventmachine', '~>1.2.3'
   s.add_dependency 'thin', '>= 1.3.1', '<2.0.0'
   s.add_dependency 'em-websocket', '~>0.5.1'
-  s.add_dependency 'sinatra', '~>1.4.8'
+  s.add_dependency 'sinatra', '>=1.4.8'
 end
